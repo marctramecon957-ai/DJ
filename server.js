@@ -1,7 +1,9 @@
 const express = require('express'), fs = require('fs'), crypto = require('crypto'), nodemailer = require('nodemailer');
 const app = express();
 app.use(express.json());
-app.use(express.static('public'));
+   const path = require('path');
+   app.use(express.static(path.join(__dirname, 'public')));
+   app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const FILE = process.env.DATA_FILE || 'data.json';
 let D = { site: { title: 'DJ Events', hero: [] }, contacts: [], calendar: {}, dossiers: [], finances: [] };
