@@ -1,5 +1,10 @@
 const express = require('express'), fs = require('fs'), crypto = require('crypto'), nodemailer = require('nodemailer');
+console.log('Démarrage…');
+process.on('uncaughtException', e => console.error('ERREUR FATALE', e));
+process.on('unhandledRejection', e => console.error('ERREUR PROMESSE', e));
 const app = express();
+// Le port est ouvert tout de suite (Render l'exige) ; les routes sont ajoutées ensuite
+app.listen(process.env.PORT || 3000, '0.0.0.0', () => console.log('Serveur ouvert sur le port', process.env.PORT || 3000));
 const path = require('path');
 app.use(express.json());
 app.use('/api', (_, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -12,10 +17,10 @@ try { D = { ...D, ...JSON.parse(fs.readFileSync(FILE)) }; } catch {}
 // Sauvegarde durable : Upstash Redis (gratuit, HTTPS) si configuré, sinon fichier local
 const UP = process.env.UPSTASH_URL, UT = process.env.UPSTASH_TOKEN;
 const up = body => fetch(UP, { method: 'POST', headers: { Authorization: 'Bearer ' + UT }, body: JSON.stringify(body) }).then(r => r.json());
-let timer;
+let timer, ready = !UP;
 const save = () => {
   try { fs.writeFileSync(FILE, JSON.stringify(D, null, 1)); } catch {}
-  if (UP) { clearTimeout(timer); timer = setTimeout(() => up(['SET', 'djdata', JSON.stringify(D)]).catch(e => console.error('ERREUR UPSTASH', e.message)), 300); }
+  if (UP && ready) { clearTimeout(timer); timer = setTimeout(() => up(['SET', 'djdata', JSON.stringify(D)]).catch(e => console.error('ERREUR UPSTASH', e.message)), 300); }
 };
 
 // ---- Mail & SMS (SMTP + Twilio). Sans config : affichés dans les logs ----
@@ -112,6 +117,6 @@ app.post('/api/admin/test-mail', adm, async (_, res) => {
 });
 
 (async () => {
-  if (UP) { try { const r = await up(['GET', 'djdata']); if (r.result) D = { ...D, ...JSON.parse(r.result) }; console.log('Données chargées depuis Upstash'); } catch (e) { console.error('ERREUR UPSTASH', e.message); } }
-  app.listen(process.env.PORT || 3000, () => console.log('OK'));
+  if (UP) { try { const r = await up(['GET', 'djdata']); if (r.result) D = { ...D, ...JSON.parse(r.result) }; console.log('Données chargées depuis Upstash'); } catch (e) { console.error('ERREUR UPSTASH', e.message); } ready = true; }
+  console.log('Routes prêtes — fichier complet');
 })();
