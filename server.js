@@ -1,22 +1,36 @@
 const express = require('express'), fs = require('fs'), crypto = require('crypto'), nodemailer = require('nodemailer');
 const app = express();
+const path = require('path');
 app.use(express.json());
-   const path = require('path');
-   app.use(express.static(path.join(__dirname, 'public')));
-   app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.use('/api', (_, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+const IDX = [path.join(__dirname, 'public', 'index.html'), path.join(__dirname, 'index.html')].find(p => fs.existsSync(p));
+app.get('/', (_, res) => res.set('Cache-Control', 'no-store').sendFile(IDX));
 
 const FILE = process.env.DATA_FILE || 'data.json';
 let D = { site: { title: 'DJ Events', hero: [] }, contacts: [], calendar: {}, dossiers: [], finances: [] };
 try { D = { ...D, ...JSON.parse(fs.readFileSync(FILE)) }; } catch {}
-const save = () => fs.writeFileSync(FILE, JSON.stringify(D, null, 1));
+// Sauvegarde durable : Upstash Redis (gratuit, HTTPS) si configuré, sinon fichier local
+const UP = process.env.UPSTASH_URL, UT = process.env.UPSTASH_TOKEN;
+const up = body => fetch(UP, { method: 'POST', headers: { Authorization: 'Bearer ' + UT }, body: JSON.stringify(body) }).then(r => r.json());
+let timer;
+const save = () => {
+  try { fs.writeFileSync(FILE, JSON.stringify(D, null, 1)); } catch {}
+  if (UP) { clearTimeout(timer); timer = setTimeout(() => up(['SET', 'djdata', JSON.stringify(D)]).catch(e => console.error('ERREUR UPSTASH', e.message)), 300); }
+};
 
 // ---- Mail & SMS (SMTP + Twilio). Sans config : affichés dans les logs ----
-const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
-  host: process.env.SMTP_HOST, port: +process.env.SMTP_PORT || 587,
+const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({ host: process.env.SMTP_HOST, port: +process.env.SMTP_PORT || 587, connectionTimeout: 8000,
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }) : null;
+// Render (offre gratuite) bloque le SMTP : on envoie par l'API HTTPS de Brevo
 const mail = async (to, subject, text) => {
-  try { mailer ? await mailer.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to, subject, text }) : console.log('MAIL', to, subject, '\n' + text); }
-  catch (e) { console.error('mail', e.message); }
+  try {
+    if (process.env.BREVO_API_KEY) {
+      const r = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'api-key': process.env.BREVO_API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: { name: process.env.MAIL_NAME || 'DJ Events', email: process.env.MAIL_FROM }, to: [{ email: to }], subject, textContent: text }) });
+      if (!r.ok) throw new Error('Brevo ' + r.status + ' ' + await r.text());
+    } else if (mailer) await mailer.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to, subject, text });
+    else console.log('MAIL (non configuré)', to, subject);
+  } catch (e) { console.error('ERREUR MAIL', to, e.message); }
 };
 const sms = async (to, body) => {
   try {
@@ -27,7 +41,7 @@ const sms = async (to, body) => {
       body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body }) });
   } catch (e) { console.error('sms', e.message); }
 };
-const both = (m, p, sub, txt) => Promise.all([m && mail(m, sub, txt), p && sms(p, txt.slice(0, 300))]);
+const both = (m, p, sub, txt) => { Promise.all([m && mail(m, sub, txt), p && sms(p, txt.slice(0, 300))]).catch(() => {}); }; // en arrière-plan : le site ne attend plus
 
 // ---- Auth admin ----
 const tokens = new Set();
@@ -90,4 +104,7 @@ app.post('/api/admin/finance', adm, (req, res) => {
 });
 app.delete('/api/admin/finance/:id', adm, (req, res) => { D.finances = D.finances.filter(f => f.id !== req.params.id); save(); res.json({ ok: 1 }); });
 
-app.listen(process.env.PORT || 3000, () => console.log('OK'));
+(async () => {
+  if (UP) { try { const r = await up(['GET', 'djdata']); if (r.result) D = { ...D, ...JSON.parse(r.result) }; console.log('Données chargées depuis Upstash'); } catch (e) { console.error('ERREUR UPSTASH', e.message); } }
+  app.listen(process.env.PORT || 3000, () => console.log('OK'));
+})();
